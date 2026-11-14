@@ -1,0 +1,21 @@
+# cross-rs configuration — https://github.com/cross-rs/cross/blob/main/docs/config_file.md
+#
+# Usage (Docker or Podman required):
+#   cross build --release      # builds for armv7-unknown-linux-gnueabihf (default target below)
+#   cross test                 # runs tests under QEMU user emulation
+#
+# Codegen flags (target-cpu=cortex-a8) live in .cargo/config.toml.
+# The workspace is mounted into the container, so cargo picks them up there too.
+
+[build]
+default-target = "armv7-unknown-linux-gnueabihf"
+
+[build.env]
+# Host env vars forwarded into the container.
+passthrough = ["RUST_BACKTRACE", "RUST_LOG"]
+
+[target.armv7-unknown-linux-gnueabihf]
+# Debian 12 (bookworm) image matching the board's OS, so linked system
+# libraries (libiio, libsystemd) and glibc are the same versions as on-device.
+# Rebuilt automatically when the Dockerfile changes.
+dockerfile = "docker/armv7-bookworm.Dockerfile"

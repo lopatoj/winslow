@@ -1,0 +1,15 @@
+[package]
+name = "hardware"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-stream = "0.3.6"
+futures-core = "0.3.34"
+gpiocdev = { version = "0.8.0", features = ["async_tokio"] }
+# Debian 12 ships libiio 0.24; the default (0.25) bindings would not match.
+industrial-io = { version = "0.6.1", default-features = false, features = ["libiio_v0_24"] }
+num-traits = "0.2.19"
+tokio = { version = "1.54.1", features = ["sync"] }
+tokio-stream = "0.1.19"
+wmidi = "4.0.11"

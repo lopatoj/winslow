@@ -1,0 +1,35 @@
+# Winslow configuration. Install as /etc/winslow/winslow.toml, then apply
+# changes with `sudo systemctl reload winslowd`.
+
+[midi]
+device = "hw:winslow"   # ALSA rawmidi device (the USB gadget's midi.id)
+channel = 1             # 1-16
+usb_gadget = true       # create the USB MIDI gadget at startup
+
+[adc]
+poll_ms = 5             # how often the ADC is sampled
+full_scale = 4095       # raw reading at the top of a pot (12-bit ADC)
+
+# Pots: 1.8 V ADC inputs, sent as 14-bit CC. `control` is optional (0-31);
+# without it the next free controller from 16 is used.
+# `device` defaults to the PocketBeagle ADC, "TI-am335x-adc.0.auto".
+
+[[input]]
+type = "pot"
+name = "AIN0 (P1.19)"
+channel = "voltage0"
+
+[[input]]
+type = "pot"
+name = "AIN1 (P1.21)"
+channel = "voltage1"
+
+# Buttons: GPIO lines, sent as note on/off. `note` is optional; without it
+# the next free note from 36 is used.
+#
+# [[input]]
+# type = "button"
+# name = "pad 1"
+# chip = "gpiochip0"
+# line = 23
+# note = 36

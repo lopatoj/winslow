@@ -1,0 +1,19 @@
+[Unit]
+Description=Winslow MIDI controller
+Documentation=file:///etc/winslow/winslow.toml
+
+[Service]
+# winslowd sends READY=1 once its inputs and MIDI output are open, and
+# RELOADING=1 / READY=1 around a reload.
+Type=notify
+ExecStart=/usr/local/bin/winslowd
+# Re-read /etc/winslow/winslow.toml. An invalid file is logged and ignored.
+ExecReload=/bin/kill -HUP $MAINPID
+# Creates /etc/winslow and passes it as $CONFIGURATION_DIRECTORY.
+ConfigurationDirectory=winslow
+# The MIDI output exits with an error if the device goes away; come back.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
