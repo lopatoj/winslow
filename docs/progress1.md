@@ -40,3 +40,13 @@ Here is the software diagram:
 ![software](software.drawio.png)
 
 I've decided on using the Tokio runtime to manage concurrency. This would simplify the application by having each component separately manage its own thread of execution, and pass events over a streams connecting each separate component asynchronously.
+
+### Remaining Work
+
+I have most of the software complete, I just need to fully handle allowing a configuration file to dynamically create the input devices being used, and to fully test and profile the application.
+
+Additionally, I mentioned above that using an RPi Pico as an input device is an option. If that's the plan, then I would need to at least write a simple arduino script for reading its ADC inputs and communicating over UART, and a corresponding input object on the pocketbeagle end.
+
+## Open Questions
+
+1. The biggest limiting factor currently is the wiring. Ideally it would all be very compact, and easily allow the container I'm using to fold close. I would appreciate advice on how to enhance the layout.
