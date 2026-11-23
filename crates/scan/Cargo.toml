@@ -1,0 +1,7 @@
+[package]
+name = "winslow-scan"
+version = "0.1.0"
+edition = "2024"
+description = "Button debouncing and rotary encoder decoding for the Pico firmware"
+
+[dependencies]

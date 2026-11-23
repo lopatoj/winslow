@@ -1,3 +1,5 @@
 [workspace]
 resolver = "3"
-members = ["crates/hardware", "crates/winslowd"]
+members = ["crates/hardware", "crates/protocol", "crates/scan", "crates/winslowd"]
+# Built by Zephyr (west) for the Pico, as its own workspace.
+exclude = ["firmware"]

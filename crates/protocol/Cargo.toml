@@ -1,0 +1,7 @@
+[package]
+name = "winslow-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "Wire format between the Pico input board and the PocketBeagle"
+
+[dependencies]

@@ -1,0 +1,2 @@
+# Vendor prefix for this project's devicetree bindings.
+winslow	Winslow MIDI controller

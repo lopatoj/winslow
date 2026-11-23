@@ -1,0 +1,84 @@
+/*
+ * Winslow input board wiring. Pin numbers are GPn (not physical pins).
+ *
+ *   GP0  (pin 1)  UART0 TX  -> PocketBeagle P2.05 (UART4 RX)
+ *   GP1  (pin 2)  UART0 RX  <- PocketBeagle P2.07 (UART4 TX)
+ *   GND           -> PocketBeagle GND
+ *
+ * Buttons and encoders switch to ground and use the internal pull-ups.
+ * Pots are wired across ADC_VREF (pin 35) and AGND (pin 33).
+ * Logs go to the USB port (cdc-acm-console snippet, see CMakeLists.txt).
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/adc/adc.h>
+
+/ {
+	chosen {
+		winslow,link-uart = &uart0;
+	};
+
+	/* Numbered 0-6 in this order. */
+	buttons {
+		compatible = "winslow,buttons";
+
+		button1 { gpios = <&gpio0 4 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; };
+		button2 { gpios = <&gpio0 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; };
+		button3 { gpios = <&gpio0 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; };
+		button4 { gpios = <&gpio0 18 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; };
+		button5 { gpios = <&gpio0 19 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; };
+		button6 { gpios = <&gpio0 20 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; };
+		encoder2_push { gpios = <&gpio0 8 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; };
+	};
+
+	/* Numbered 0-2. A = CLK, B = DT; swap them to reverse the direction. */
+	encoders {
+		compatible = "winslow,encoders";
+
+		encoder1 {
+			a-gpios = <&gpio0 14 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+			b-gpios = <&gpio0 15 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+		};
+		encoder2 {
+			a-gpios = <&gpio0 9 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+			b-gpios = <&gpio0 7 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+		};
+		encoder3 {
+			a-gpios = <&gpio0 5 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+			b-gpios = <&gpio0 6 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+		};
+	};
+
+	/* Numbered 0-2: GP26, GP27, GP28. (ADC3/GP29 measures VSYS on the Pico.) */
+	pots {
+		compatible = "winslow,pots";
+		io-channels = <&adc 0>, <&adc 1>, <&adc 2>;
+	};
+};
+
+&adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+	channel@2 {
+		reg = <2>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+};

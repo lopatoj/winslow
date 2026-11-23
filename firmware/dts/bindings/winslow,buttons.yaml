@@ -1,0 +1,15 @@
+description: |
+  Buttons sent to the PocketBeagle. Each child is one button; they are
+  numbered in order (0-15) as they appear here.
+
+  Flag each pin so that it reads active when pressed, e.g. a button to
+  ground: <&gpio0 16 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>.
+
+compatible: "winslow,buttons"
+
+child-binding:
+  description: One button.
+  properties:
+    gpios:
+      type: phandle-array
+      required: true

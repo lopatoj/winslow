@@ -1,0 +1,21 @@
+description: |
+  Rotary encoders sent to the PocketBeagle. Each child is one encoder; they
+  are numbered in order (0-15) as they appear here. Swap a-gpios and b-gpios
+  to reverse the direction. An encoder's push switch is a button.
+
+compatible: "winslow,encoders"
+
+child-binding:
+  description: One quadrature encoder.
+  properties:
+    a-gpios:
+      type: phandle-array
+      required: true
+    b-gpios:
+      type: phandle-array
+      required: true
+    steps-per-detent:
+      type: int
+      default: 4
+      enum: [1, 2, 4]
+      description: Quadrature steps per click; 4 for most encoders (EC11).

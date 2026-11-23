@@ -1,0 +1,11 @@
+description: |
+  Potentiometers sent to the PocketBeagle, numbered (0-15) in the order of
+  io-channels. Each referenced ADC channel needs a channel@N node configuring
+  it (12-bit resolution assumed).
+
+compatible: "winslow,pots"
+
+properties:
+  io-channels:
+    type: phandle-array
+    required: true

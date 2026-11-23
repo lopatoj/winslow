@@ -1,0 +1,27 @@
+[package]
+# Zephyr's build requires this name.
+name = "rustapp"
+version = "0.1.0"
+edition = "2021"
+description = "Winslow Pico firmware: buttons and encoders to the PocketBeagle over UART"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+zephyr = "0.1.0"
+zephyr-panic = "0.1.0"
+log = "0.4.22"
+winslow-protocol = { path = "../crates/protocol" }
+winslow-scan = { path = "../crates/scan" }
+
+[build-dependencies]
+zephyr-build = "0.1.0"
+
+# Not part of the PocketBeagle workspace one directory up.
+[workspace]
+
+[profile.release]
+debug-assertions = false
+overflow-checks = false
+debug = true
