@@ -1,0 +1,10 @@
+mainmenu "Winslow Pico firmware"
+
+config WINSLOW_ENCODER_DEBUG
+	bool "Log raw encoder pin activity"
+	help
+	  Every 250 ms, log each encoder's raw pin changes, invalid
+	  transitions (both pins changing between samples) and decoded
+	  clicks to the console. For diagnosing wiring; see debug.conf.
+
+source "Kconfig.zephyr"

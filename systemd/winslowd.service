@@ -1,12 +1,19 @@
 [Unit]
 Description=Winslow MIDI controller
 Documentation=file:///etc/winslow/winslow.toml
+# Start after BeagleBoard.org's USB gadget (networking), which we add MIDI to.
+# It binds in the background, so winslowd also waits for it (gadget.rs).
+After=bb-usb-gadgets.service
 
 [Service]
 # winslowd sends READY=1 once its inputs and MIDI output are open, and
 # RELOADING=1 / READY=1 around a reload.
 Type=notify
+# The Pico's UART is set in /etc/winslow/winslow.toml. On UART0 (ttyS0) the
+# serial console must be moved off it first; see docs/pocketbeagle-setup.md.
 ExecStart=/usr/local/bin/winslowd
+# Startup may wait up to 60 s for the system's USB gadget (see gadget.rs).
+TimeoutStartSec=120
 # Re-read /etc/winslow/winslow.toml. An invalid file is logged and ignored.
 ExecReload=/bin/kill -HUP $MAINPID
 # Creates /etc/winslow and passes it as $CONFIGURATION_DIRECTORY.

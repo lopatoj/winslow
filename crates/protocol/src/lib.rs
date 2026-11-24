@@ -14,14 +14,21 @@
 //! | `9n`           | button `n` pressed                                   |
 //! | `An dd`        | encoder `n` turned `dd` detents (7-bit signed)       |
 //! | `Bn mm ll`     | pot `n` = `mm << 7 \| ll` (14-bit)                    |
-//! | `F0 vv`        | hello: board (re)started or answered a sync, version `vv` |
+//! | `F0 vv`        | hello, protocol version `vv` (first reply to a sync) |
 //! | `F1`           | heartbeat, every 500 ms                              |
 //!
 //! PocketBeagle → Pico:
 //!
 //! | Bytes | Message                                                        |
 //! |-------|----------------------------------------------------------------|
+//! | `F1`  | heartbeat, every 500 ms                                        |
 //! | `F2`  | sync request: the Pico answers with hello, a `9n` for every button currently held, and a `Bn` for every pot |
+//!
+//! The Pico only sends while the PocketBeagle is talking to it: it starts
+//! silent, and goes silent again 2 s after the last message it received. The
+//! PocketBeagle sends `F2` every 500 ms until it gets an answer, then `F1`.
+//! This keeps the Pico from disturbing U-Boot, which listens on the
+//! PocketBeagle's UART0 at power-on, when it is wired there.
 //!
 //! `n` is 0-15, so a board has at most 16 buttons, 16 encoders and 16
 //! analog inputs.

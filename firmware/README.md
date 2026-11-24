@@ -14,15 +14,15 @@ cargo test -p winslow-protocol -p winslow-scan
 
 Inputs are defined in [`boards/rpi_pico.overlay`](boards/rpi_pico.overlay);
 adding one there is all it takes (no code changes). Each kind is numbered in
-the order listed, max 16. Buttons and encoders switch to ground (internal
-pull-ups); pots are wired across ADC_VREF (pin 35) and AGND (pin 33).
+the order listed, max 16. Buttons 1-6 switch to 3.3 V (internal pull-downs);
+the encoders and encoder 2's push switch switch to ground (internal pull-ups); pots are wired across ADC_VREF (pin 35) and AGND (pin 33).
 
 | Protocol index | Input            | Pins                    |
 |----------------|------------------|-------------------------|
 | button 0-2     | buttons 1-3      | GP4, GP3, GP2           |
 | button 3-5     | buttons 4-6      | GP18, GP19, GP20        |
 | button 6       | encoder 2 push   | GP8                     |
-| encoder 0      | encoder 1        | CLK GP14, DT GP15       |
+| encoder 0      | encoder 1        | GP14, GP15 (A = GP15)   |
 | encoder 1      | encoder 2        | CLK GP9, DT GP7         |
 | encoder 2      | encoder 3        | CLK GP5, DT GP6         |
 | pot 0-2        | pots             | GP26, GP27, GP28 (ADC0-2) |

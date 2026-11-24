@@ -8,7 +8,9 @@
 //! The device is opened non-blocking. When its buffer is full (no host
 //! reading: unplugged, or no app has the port open) a write waits up to
 //! [`WRITE_TIMEOUT`] for room, then the message is dropped, so a missing host
-//! can never stall the daemon indefinitely.
+//! can never stall the daemon indefinitely. While messages are being dropped,
+//! new ones are dropped at once instead of each waiting again; otherwise the
+//! inputs would back up behind a host that isn't listening.
 
 use std::error::Error;
 use std::io;
@@ -133,7 +135,13 @@ impl Writer {
     /// receiver resynchronizes at the next status byte, so this only garbles
     /// that one message.
     fn write_all(&mut self) -> Result<(), WriteError> {
-        let deadline = Instant::now() + WRITE_TIMEOUT;
+        // Already dropping: only take what fits right now.
+        let timeout = if self.dropped > 0 {
+            Duration::ZERO
+        } else {
+            WRITE_TIMEOUT
+        };
+        let deadline = Instant::now() + timeout;
         let mut sent = 0;
 
         while sent < self.buf.len() {

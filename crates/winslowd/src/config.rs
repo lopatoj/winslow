@@ -20,6 +20,7 @@
 //! [adc]
 //! poll_ms = 5
 //! full_scale = 4095       # raw reading at the top of the pot's travel
+//! deadband = 8            # smallest change reported, in raw counts
 //!
 //! [[input]]
 //! type = "pot"
@@ -31,9 +32,28 @@
 //! chip = "gpiochip0"
 //! line = 23
 //! note = 60               # optional: else the next free one from 36
+//!
+//! # Inputs on the Pico board, by their index in its firmware.
+//! [pico]
+//! port = "/dev/ttyS4"
+//!
+//! [[input]]
+//! type = "pico-button"
+//! index = 0
+//! note = 40               # optional, as for "button"
+//!
+//! [[input]]
+//! type = "pico-encoder"
+//! index = 0
+//! control = 102           # optional: 0-119, else the next free from 102
+//!
+//! [[input]]
+//! type = "pico-pot"
+//! index = 0
+//! control = 20            # optional, as for "pot"
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -41,6 +61,7 @@ use std::time::Duration;
 use hardware::event::Event;
 use hardware::gpio::CDevGpio;
 use hardware::iio::IioDevice;
+use hardware::pico::PicoBoard;
 use industrial_io::Context;
 use serde::Deserialize;
 use wmidi::{Channel, ControlFunction, Note, U7};
@@ -63,6 +84,8 @@ pub struct Config {
     pub midi: MidiConfig,
     #[serde(default)]
     pub adc: AdcConfig,
+    #[serde(default)]
+    pub pico: PicoConfig,
     #[serde(default, rename = "input")]
     pub inputs: Vec<Input>,
 }
@@ -96,7 +119,10 @@ pub struct AdcConfig {
     /// How often each IIO device is sampled.
     pub poll_ms: u64,
     /// Raw reading that maps to the top of the range (4095 for 12 bits).
-    pub full_scale: u32,
+    pub full_scale: u16,
+    /// Smallest change reported, in raw counts. Readings jitter by a count or
+    /// two with the pot untouched; 8 of 4095 is ~0.2% of the travel.
+    pub deadband: u16,
 }
 
 impl Default for AdcConfig {
@@ -104,6 +130,26 @@ impl Default for AdcConfig {
         Self {
             poll_ms: 5,
             full_scale: 4095,
+            deadband: 8,
+        }
+    }
+}
+
+/// The serial link to the Pico board; only opened if a `pico-*` input exists.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct PicoConfig {
+    /// `/dev/ttyS4` is UART4 (P2.05/P2.07); `/dev/ttyS0` is UART0
+    /// (P1.30/P1.32), which is the serial console unless moved.
+    pub port: String,
+    pub baud: u32,
+}
+
+impl Default for PicoConfig {
+    fn default() -> Self {
+        Self {
+            port: "/dev/ttyS4".into(),
+            baud: 115200,
         }
     }
 }
@@ -122,6 +168,9 @@ pub enum Input {
         channel: String,
         /// Controller 0-31 (the LSB goes on +32); next free one if omitted.
         control: Option<u8>,
+        /// Reverse the direction (for a pot wired the other way round).
+        #[serde(default)]
+        invert: bool,
     },
     /// A GPIO line, sent as note on (press) / note off (release).
     Button {
@@ -132,6 +181,32 @@ pub enum Input {
         /// Note 0-127; next free one from 36 if omitted.
         note: Option<u8>,
     },
+    /// A button on the Pico board, sent like [`Input::Button`].
+    #[serde(rename = "pico-button")]
+    PicoButton {
+        name: Option<String>,
+        /// The button's number in the Pico firmware (0-15).
+        index: u8,
+        note: Option<u8>,
+    },
+    /// A rotary encoder on the Pico board, sent as relative CC (two's
+    /// complement: 1 = one click clockwise, 127 = one counter-clockwise).
+    #[serde(rename = "pico-encoder")]
+    PicoEncoder {
+        name: Option<String>,
+        index: u8,
+        /// Controller 0-119; next free one from 102 if omitted.
+        control: Option<u8>,
+    },
+    /// A pot on the Pico board, sent like [`Input::Pot`].
+    #[serde(rename = "pico-pot")]
+    PicoPot {
+        name: Option<String>,
+        index: u8,
+        control: Option<u8>,
+        #[serde(default)]
+        invert: bool,
+    },
 }
 
 fn default_adc() -> String {
@@ -141,8 +216,11 @@ fn default_adc() -> String {
 impl Input {
     fn label(&self, index: usize) -> String {
         let (name, kind) = match self {
-            Input::Pot { name, .. } => (name, "pot"),
-            Input::Button { name, .. } => (name, "button"),
+            Input::Pot { name, .. } => (name, "pot".into()),
+            Input::Button { name, .. } => (name, "button".into()),
+            Input::PicoButton { name, index, .. } => (name, format!("Pico button {index}")),
+            Input::PicoEncoder { name, index, .. } => (name, format!("Pico encoder {index}")),
+            Input::PicoPot { name, index, .. } => (name, format!("Pico pot {index}")),
         };
         match name {
             Some(name) => format!("input {} ({kind} \"{name}\")", index + 1),
@@ -151,19 +229,37 @@ impl Input {
     }
 
     fn position(&self) -> Result<MidiType, String> {
+        let control = |c: u8| {
+            U7::new(c)
+                .map(ControlFunction)
+                .map_err(|_| format!("control {c} is out of range"))
+        };
         Ok(match *self {
-            Input::Pot { control: None, .. } => MidiType::NextControl,
-            Input::Pot {
-                control: Some(c), ..
-            } => {
-                let c = U7::new(c).map_err(|_| format!("control {c} is out of range"))?;
-                MidiType::Control(ControlFunction(c))
-            }
-            Input::Button { note: None, .. } => MidiType::NextNote,
-            Input::Button { note: Some(n), .. } => MidiType::Note(
-                Note::try_from(n).map_err(|_| format!("note {n} is out of range (0-127)"))?,
-            ),
+            Input::Pot { control: c, .. } | Input::PicoPot { control: c, .. } => match c {
+                None => MidiType::NextControl,
+                Some(c) => MidiType::Control(control(c)?),
+            },
+            Input::Button { note, .. } | Input::PicoButton { note, .. } => match note {
+                None => MidiType::NextNote,
+                Some(n) => MidiType::Note(
+                    Note::try_from(n).map_err(|_| format!("note {n} is out of range (0-127)"))?,
+                ),
+            },
+            Input::PicoEncoder { control: c, .. } => match c {
+                None => MidiType::NextRelative,
+                Some(c) => MidiType::Relative(control(c)?),
+            },
         })
+    }
+
+    /// For Pico inputs, (kind, index) to check for duplicates.
+    fn pico_id(&self) -> Option<(&'static str, u8)> {
+        match *self {
+            Input::PicoButton { index, .. } => Some(("button", index)),
+            Input::PicoEncoder { index, .. } => Some(("encoder", index)),
+            Input::PicoPot { index, .. } => Some(("pot", index)),
+            _ => None,
+        }
     }
 }
 
@@ -173,6 +269,9 @@ pub struct Io {
     /// One per distinct IIO device; [`IioDevice::spawn`] each to start
     /// sampling its pots.
     pub iio_devices: Vec<IioDevice>,
+    /// Set if any Pico input is configured; [`PicoBoard::spawn`] it to
+    /// start reading.
+    pub pico: Option<PicoBoard>,
 }
 
 impl Config {
@@ -218,8 +317,20 @@ impl Config {
         if self.inputs.is_empty() {
             return Err("no inputs configured (add an [[input]] section)".into());
         }
+        if self.pico.baud == 0 {
+            return Err("pico.baud must be set".into());
+        }
+        let mut pico_inputs = HashSet::new();
         let mut dry_run = MidiCollector::<Event>::new(Channel::Ch1);
         for (i, input) in self.inputs.iter().enumerate() {
+            if let Some((kind, index)) = input.pico_id() {
+                if index > winslow_protocol::MAX_INDEX {
+                    return Err(format!("{}: index must be 0-15", input.label(i)).into());
+                }
+                if !pico_inputs.insert((kind, index)) {
+                    return Err(format!("{}: used more than once", input.label(i)).into());
+                }
+            }
             let position = input
                 .position()
                 .map_err(|e| format!("{}: {e}", input.label(i)))?;
@@ -244,6 +355,19 @@ impl Config {
         let mut ctx: Option<Context> = None;
         // Pots on the same IIO device share one poller.
         let mut iio: BTreeMap<&str, IioDevice> = BTreeMap::new();
+        let mut pico: Option<PicoBoard> = None;
+
+        // P2.36 only reaches AIN7 through the PMIC's multiplexer.
+        let uses_ain7 = self.inputs.iter().any(|input| {
+            matches!(input, Input::Pot { device, channel, .. }
+                if device == DEFAULT_ADC && channel == "voltage7")
+        });
+        if uses_ain7 {
+            match hardware::pocketbeagle::enable_ain7() {
+                Ok(()) => log::info!("routed P2.36 to AIN7 through the PMIC multiplexer"),
+                Err(e) => log::warn!("cannot route P2.36 to AIN7 ({e}); AIN7 will float"),
+            }
+        }
 
         for (i, input) in self.inputs.iter().enumerate() {
             let label = input.label(i);
@@ -265,8 +389,8 @@ impl Config {
                             .find_device(device)
                             .ok_or_else(|| in_context(&format!("no IIO device \"{device}\"")))?;
                         let period = Duration::from_millis(self.adc.poll_ms);
-                        let full_scale = self.adc.full_scale as f32;
-                        iio.insert(device, IioDevice::new(dev, period, full_scale));
+                        let (full_scale, deadband) = (self.adc.full_scale, self.adc.deadband);
+                        iio.insert(device, IioDevice::new(dev, period, full_scale, deadband));
                     }
                     iio.get_mut(device.as_str())
                         .expect("inserted above")
@@ -278,6 +402,28 @@ impl Config {
                         in_context(&format!("cannot request {chip} line {line}: {e}"))
                     })?,
                 ),
+                Input::PicoButton { index, .. }
+                | Input::PicoEncoder { index, .. }
+                | Input::PicoPot { index, .. } => {
+                    if pico.is_none() {
+                        let board = PicoBoard::open(&self.pico.port, self.pico.baud)
+                            .map_err(|e| in_context(&e))?;
+                        pico = Some(board);
+                    }
+                    let board = pico.as_mut().expect("opened above");
+                    match input {
+                        Input::PicoButton { .. } => board.button(*index),
+                        Input::PicoEncoder { .. } => board.encoder(*index),
+                        _ => board.pot(*index),
+                    }
+                    .map_err(|e| in_context(&e))?
+                }
+            };
+            let source = match input {
+                Input::Pot { invert: true, .. } | Input::PicoPot { invert: true, .. } => {
+                    Box::new(Inverted(source))
+                }
+                _ => source,
             };
             let position = input.position().map_err(|e| in_context(&e))?;
             collector
@@ -289,6 +435,7 @@ impl Config {
         Ok(Io {
             collector,
             iio_devices: iio.into_values().collect(),
+            pico,
         })
     }
 }
@@ -299,6 +446,23 @@ fn chip_path(chip: &str) -> PathBuf {
         chip.into()
     } else {
         Path::new("/dev").join(chip)
+    }
+}
+
+/// Reverses a pot: a position `v` becomes `1 - v`.
+struct Inverted(Box<dyn hardware::source::EventSource<Event> + Send>);
+
+impl hardware::source::EventSource<Event> for Inverted {
+    fn events(
+        &mut self,
+    ) -> futures_core::stream::BoxStream<'static, hardware::error::Result<Event>> {
+        use tokio_stream::StreamExt;
+        Box::pin(self.0.events().map(|item| {
+            item.map(|event| match event {
+                Event::Change(v) => Event::Change(1.0 - v),
+                other => other,
+            })
+        }))
     }
 }
 
@@ -356,6 +520,7 @@ mod tests {
                     device: DEFAULT_ADC.into(),
                     channel: "voltage0".into(),
                     control: Some(7),
+                    invert: false,
                 },
                 Input::Button {
                     name: None,
@@ -416,9 +581,103 @@ mod tests {
     }
 
     #[test]
+    fn pico_inputs_parse() {
+        let config = Config::parse(
+            r#"
+            [pico]
+            port = "/dev/ttyUSB0"
+
+            [[input]]
+            type = "pico-button"
+            index = 6
+            [[input]]
+            type = "pico-encoder"
+            name = "browse"
+            index = 1
+            [[input]]
+            type = "pico-pot"
+            index = 2
+            control = 20
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.pico.port, "/dev/ttyUSB0");
+        assert_eq!(config.pico.baud, 115200);
+        assert_eq!(
+            config.inputs[1],
+            Input::PicoEncoder {
+                name: Some("browse".into()),
+                index: 1,
+                control: None,
+            }
+        );
+        assert_eq!(config.inputs[1].position(), Ok(MidiType::NextRelative));
+    }
+
+    #[test]
+    fn pico_inputs_are_checked() {
+        let e = err("[[input]]\ntype = \"pico-pot\"\nindex = 16");
+        assert!(e.contains("0-15"), "{e}");
+        let e = err("[[input]]\ntype = \"pico-button\"\nindex = 1\n\
+                     [[input]]\ntype = \"pico-button\"\nindex = 1");
+        assert!(
+            e.contains("Pico button 1") && e.contains("more than once"),
+            "{e}"
+        );
+        // Same index, different kinds is fine.
+        Config::parse(
+            "[[input]]\ntype = \"pico-button\"\nindex = 1\n\
+             [[input]]\ntype = \"pico-encoder\"\nindex = 1",
+        )
+        .unwrap();
+        let e = err("[[input]]\ntype = \"pico-encoder\"\nindex = 0\ncontrol = 121");
+        assert!(e.contains("channel mode"), "{e}");
+    }
+
+    #[test]
+    fn invert_option() {
+        let config = Config::parse(
+            "[[input]]\ntype = \"pico-pot\"\nindex = 0\ninvert = true\n\
+             [[input]]\ntype = \"pot\"\nchannel = \"v\"",
+        )
+        .unwrap();
+        assert!(matches!(config.inputs[0], Input::PicoPot { invert: true, .. }));
+        assert!(matches!(config.inputs[1], Input::Pot { invert: false, .. }));
+    }
+
+    #[tokio::test]
+    async fn inverted_flips_positions_only() {
+        use hardware::source::EventSource;
+        use tokio_stream::StreamExt;
+
+        struct Fixed;
+        impl EventSource<Event> for Fixed {
+            fn events(
+                &mut self,
+            ) -> futures_core::stream::BoxStream<'static, hardware::error::Result<Event>> {
+                Box::pin(tokio_stream::iter([
+                    Ok(Event::Change(0.25)),
+                    Ok(Event::Change(1.0)),
+                    Ok(Event::Rising),
+                ]))
+            }
+        }
+        let events: Vec<Event> = Inverted(Box::new(Fixed))
+            .events()
+            .map(|r| r.ok().unwrap())
+            .collect()
+            .await;
+        assert_eq!(
+            events,
+            [Event::Change(0.75), Event::Change(0.0), Event::Rising]
+        );
+    }
+
+    #[test]
     fn shipped_example_is_valid() {
         let config = Config::parse(include_str!("../../../systemd/winslow.toml")).unwrap();
-        assert_eq!(config.inputs.len(), 2);
+        // 6 PocketBeagle pots + 7 buttons, 3 encoders and 3 pots on the Pico.
+        assert_eq!(config.inputs.len(), 19);
     }
 
     #[test]

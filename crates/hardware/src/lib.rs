@@ -3,4 +3,5 @@ pub mod event;
 pub mod gpio;
 pub mod iio;
 pub mod pico;
+pub mod pocketbeagle;
 pub mod source;

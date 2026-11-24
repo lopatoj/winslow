@@ -12,6 +12,11 @@ const FIRST_CONTROL: u8 = 16;
 /// Highest controller that can carry a 14-bit value: its LSB goes on
 /// controller + 32, and 32-63 are reserved for exactly those LSBs.
 const LAST_CONTROL: u8 = 31;
+/// Range handed out by [`MidiType::NextRelative`]: CC 102-119 are undefined.
+const FIRST_RELATIVE: u8 = 102;
+const LAST_RELATIVE: u8 = 119;
+/// CC 120-127 are channel mode messages (all notes off, etc.).
+const LAST_CC: u8 = 119;
 /// Range handed out by [`MidiType::NextNote`] (36 = C1, the usual first drum pad).
 const FIRST_NOTE: u8 = 36;
 const LAST_NOTE: u8 = 127;
@@ -22,10 +27,14 @@ pub enum MidiType {
     NextNote,
     /// The lowest free 14-bit controller from 16 to 31.
     NextControl,
+    /// The lowest free single controller from 102 to 119 (for encoders).
+    NextRelative,
     /// A specific note.
     Note(wmidi::Note),
     /// A specific 14-bit controller (0-31); its LSB is sent on controller + 32.
     Control(wmidi::ControlFunction),
+    /// A specific single controller (0-119), e.g. for relative values.
+    Relative(wmidi::ControlFunction),
 }
 
 pub struct MidiCollector<E: AsMidi + Send + 'static> {
@@ -33,8 +42,9 @@ pub struct MidiCollector<E: AsMidi + Send + 'static> {
     sources: Vec<(Box<dyn EventSource<E> + Send>, u8)>,
     /// Bit n set = note n is taken.
     used_notes: u128,
-    /// Bit n set = controller n (and its LSB partner n + 32) is taken.
-    used_controls: u32,
+    /// Bit n set = controller n is taken. A 14-bit controller takes both n
+    /// and its LSB partner n + 32.
+    used_ccs: u128,
 }
 
 impl<E: AsMidi + Send + 'static> MidiCollector<E> {
@@ -43,7 +53,7 @@ impl<E: AsMidi + Send + 'static> MidiCollector<E> {
             channel,
             sources: vec![],
             used_notes: 0,
-            used_controls: 0,
+            used_ccs: 0,
         }
     }
 
@@ -58,27 +68,36 @@ impl<E: AsMidi + Send + 'static> MidiCollector<E> {
         source: Box<dyn EventSource<E> + Send>,
         position: MidiType,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let note_taken = |n: u8| self.used_notes & (1u128 << n) != 0;
-        let control_taken = |c: u8| self.used_controls & (1u32 << c) != 0;
+        let note_free = |n: u8| self.used_notes & (1u128 << n) == 0;
+        let cc_free = |c: u8| self.used_ccs & (1u128 << c) == 0;
+        // A 14-bit controller needs its LSB partner free too.
+        let control_free = |c: u8| cc_free(c) && cc_free(c + 32);
 
         let p = match position {
             MidiType::NextNote => {
                 let n = (FIRST_NOTE..=LAST_NOTE)
-                    .find(|&n| !note_taken(n))
+                    .find(|&n| note_free(n))
                     .ok_or("no free notes left (36-127)")?;
                 self.used_notes |= 1 << n;
                 n
             }
             MidiType::NextControl => {
                 let c = (FIRST_CONTROL..=LAST_CONTROL)
-                    .find(|&c| !control_taken(c))
+                    .find(|&c| control_free(c))
                     .ok_or("no free 14-bit controllers left (16-31)")?;
-                self.used_controls |= 1 << c;
+                self.used_ccs |= 1 << c | 1 << (c + 32);
+                c
+            }
+            MidiType::NextRelative => {
+                let c = (FIRST_RELATIVE..=LAST_RELATIVE)
+                    .find(|&c| cc_free(c))
+                    .ok_or("no free controllers left for encoders (102-119)")?;
+                self.used_ccs |= 1 << c;
                 c
             }
             MidiType::Note(note) => {
                 let n = u8::from(note);
-                if note_taken(n) {
+                if !note_free(n) {
                     return Err(format!("note {n} is already registered").into());
                 }
                 self.used_notes |= 1 << n;
@@ -93,10 +112,28 @@ impl<E: AsMidi + Send + 'static> MidiCollector<E> {
                     )
                     .into());
                 }
-                if control_taken(c) {
+                if !control_free(c) {
+                    return Err(format!(
+                        "controller {c} (or its LSB partner {}) is already registered",
+                        c + 32
+                    )
+                    .into());
+                }
+                self.used_ccs |= 1 << c | 1 << (c + 32);
+                c
+            }
+            MidiType::Relative(control) => {
+                let c = u8::from(control);
+                if c > LAST_CC {
+                    return Err(format!(
+                        "controller {c} is a channel mode message: use 0-{LAST_CC}"
+                    )
+                    .into());
+                }
+                if !cc_free(c) {
                     return Err(format!("controller {c} is already registered").into());
                 }
-                self.used_controls |= 1 << c;
+                self.used_ccs |= 1 << c;
                 c
             }
         };
@@ -228,6 +265,43 @@ mod tests {
         let mut c = collector();
         assert_eq!(register(&mut c, note(20)), Ok(20));
         assert_eq!(register(&mut c, control(20)), Ok(20));
+    }
+
+    fn relative(c: u8) -> MidiType {
+        MidiType::Relative(ControlFunction(U7::new(c).unwrap()))
+    }
+
+    #[test]
+    fn next_relative_uses_102_to_119_then_fails() {
+        let mut c = collector();
+        let assigned: Vec<u8> = (0..18)
+            .map(|_| register(&mut c, MidiType::NextRelative).unwrap())
+            .collect();
+        assert_eq!(assigned, (102..=119).collect::<Vec<u8>>());
+        assert!(register(&mut c, MidiType::NextRelative).is_err());
+    }
+
+    #[test]
+    fn relative_and_14_bit_controllers_dont_overlap() {
+        let mut c = collector();
+        assert_eq!(register(&mut c, control(16)), Ok(16));
+        // 16's LSB lives on 48.
+        let err = register(&mut c, relative(48)).unwrap_err();
+        assert!(err.contains("already registered"), "{err}");
+        assert!(register(&mut c, relative(16)).is_err());
+        // And the other way round: a relative CC on 49 blocks 14-bit 17.
+        assert_eq!(register(&mut c, relative(49)), Ok(49));
+        assert!(register(&mut c, control(17)).is_err());
+        assert_eq!(register(&mut c, MidiType::NextControl), Ok(18), "skips 17");
+    }
+
+    #[test]
+    fn channel_mode_controllers_are_rejected() {
+        let mut c = collector();
+        for cc in 120..=127 {
+            assert!(register(&mut c, relative(cc)).is_err());
+        }
+        assert_eq!(register(&mut c, relative(119)), Ok(119));
     }
 
     #[test]

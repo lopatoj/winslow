@@ -3,8 +3,9 @@
 //! One [`IioDevice`] samples all of its registered channels on a dedicated
 //! thread: sysfs reads block, and libiio's `Channel` can't be sent between
 //! threads, so it doesn't fit on the async runtime. Each channel gets its own
-//! [`IioChannel`] event source; a value is sent only when the raw reading
-//! changes, normalized to 0.0..=1.0.
+//! [`IioChannel`] event source. Readings are smoothed (the ADC jitters by a
+//! count or two even with the pot untouched) and only real changes are sent,
+//! normalized to 0.0..=1.0.
 
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -14,6 +15,7 @@ use futures_core::stream::BoxStream;
 use industrial_io::{Device, Direction, Error as IioError};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_stream::wrappers::ReceiverStream;
+use winslow_scan::Smoother;
 
 use crate::{
     error::{Error, NewResult, Result},
@@ -36,16 +38,19 @@ pub struct IioDevice {
     device: Device,
     period: Duration,
     /// Raw reading that maps to 1.0 (4095 for a 12-bit ADC).
-    full_scale: f32,
+    full_scale: u16,
+    /// Smallest change in raw counts that is reported.
+    deadband: u16,
     channels: Vec<InnerChannel>,
 }
 
 impl IioDevice {
-    pub fn new(device: Device, period: Duration, full_scale: f32) -> Self {
+    pub fn new(device: Device, period: Duration, full_scale: u16, deadband: u16) -> Self {
         Self {
             device,
             period,
-            full_scale,
+            full_scale: full_scale.max(1),
+            deadband,
             channels: vec![],
         }
     }
@@ -75,8 +80,9 @@ impl IioDevice {
         struct Running {
             channel: industrial_io::Channel,
             tx: mpsc::Sender<Result<Event>>,
-            /// Last raw value delivered, so unchanged readings aren't resent.
-            last: Option<i64>,
+            smoother: Smoother,
+            /// A value the consumer had no room for yet; retried next tick.
+            pending: Option<f32>,
             /// Report a failing read once, not on every sample.
             failing: bool,
         }
@@ -94,7 +100,8 @@ impl IioDevice {
                 Some(Running {
                     channel: channel?,
                     tx: c.tx,
-                    last: None,
+                    smoother: Smoother::new(self.full_scale, self.deadband),
+                    pending: None,
                     failing: false,
                 })
             })
@@ -106,31 +113,32 @@ impl IioDevice {
                 if c.tx.is_closed() {
                     return false;
                 }
-                let item = match c.channel.attr_read_int("raw") {
-                    Ok(raw) if c.last == Some(raw) => return true,
+                match c.channel.attr_read_int("raw") {
                     Ok(raw) => {
                         c.failing = false;
-                        Ok((raw, (raw as f32 / self.full_scale).clamp(0.0, 1.0)))
+                        let raw = raw.clamp(0, u16::MAX as i64) as u16;
+                        if let Some(v) = c.smoother.update(raw) {
+                            c.pending = Some(v as f32 / self.full_scale as f32);
+                        }
                     }
-                    Err(_) if c.failing => return true,
+                    Err(_) if c.failing => {}
                     Err(e) => {
                         c.failing = true;
-                        Err(Error::from(e))
-                    }
-                };
-                match item {
-                    Ok((raw, value)) => match c.tx.try_send(Ok(Event::Change(value))) {
-                        Ok(()) => {
-                            c.last = Some(raw);
-                            true
+                        if let Err(TrySendError::Closed(_)) = c.tx.try_send(Err(e.into())) {
+                            return false;
                         }
-                        // Consumer is behind: skip this sample. `last` stays
-                        // old, so the value is sent again on the next tick.
-                        Err(TrySendError::Full(_)) => true,
-                        Err(TrySendError::Closed(_)) => false,
-                    },
-                    Err(e) => !matches!(c.tx.try_send(Err(e)), Err(TrySendError::Closed(_))),
+                    }
                 }
+                if let Some(value) = c.pending {
+                    match c.tx.try_send(Ok(Event::Change(value))) {
+                        Ok(()) => c.pending = None,
+                        // Consumer is behind: keep it (or a newer value) for
+                        // the next tick.
+                        Err(TrySendError::Full(_)) => {}
+                        Err(TrySendError::Closed(_)) => return false,
+                    }
+                }
+                true
             });
 
             // Fixed rate without drift; if we fell behind, don't try to catch up.

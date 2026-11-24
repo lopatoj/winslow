@@ -9,6 +9,7 @@ usb_gadget = true       # create the USB MIDI gadget at startup
 [adc]
 poll_ms = 5             # how often the ADC is sampled
 full_scale = 4095       # raw reading at the top of a pot (12-bit ADC)
+deadband = 8            # smallest change sent, in raw counts (~0.2%)
 
 # Pots: 1.8 V ADC inputs, sent as 14-bit CC. `control` is optional (0-31);
 # without it the next free controller from 16 is used.
@@ -24,6 +25,29 @@ type = "pot"
 name = "AIN1 (P1.21)"
 channel = "voltage1"
 
+[[input]]
+type = "pot"
+name = "AIN2 (P1.23)"
+channel = "voltage2"
+
+[[input]]
+type = "pot"
+name = "AIN3 (P1.25)"
+channel = "voltage3"
+
+[[input]]
+type = "pot"
+name = "AIN4 (P1.27), deck 2 low EQ"
+channel = "voltage4"
+invert = true
+
+# P2.36 reaches AIN7 through the PMIC multiplexer; winslowd enables it.
+[[input]]
+type = "pot"
+name = "AIN7 (P2.36), deck 2 high EQ"
+channel = "voltage7"
+invert = true
+
 # Buttons: GPIO lines, sent as note on/off. `note` is optional; without it
 # the next free note from 36 is used.
 #
@@ -33,3 +57,84 @@ channel = "voltage1"
 # chip = "gpiochip0"
 # line = 23
 # note = 36
+
+# The Pico board (firmware/). Inputs are referred to by their index in the
+# firmware's overlay. Wired to UART0: Pico GP0 -> P1.32, GP1 <- P1.30. UART0
+# is the serial console by default; see docs/pocketbeagle-setup.md to free it.
+# (UART4, /dev/ttyS4 on P2.05/P2.07, needs no setup.)
+[pico]
+port = "/dev/ttyS0"
+baud = 115200
+
+# Pico buttons: note on/off, like "button".
+[[input]]
+type = "pico-button"
+name = "button 1 (GP4)"
+index = 0
+
+[[input]]
+type = "pico-button"
+name = "button 2 (GP3)"
+index = 1
+
+[[input]]
+type = "pico-button"
+name = "button 3 (GP2)"
+index = 2
+
+[[input]]
+type = "pico-button"
+name = "button 4 (GP18)"
+index = 3
+
+[[input]]
+type = "pico-button"
+name = "button 5 (GP19)"
+index = 4
+
+[[input]]
+type = "pico-button"
+name = "button 6 (GP20)"
+index = 5
+
+[[input]]
+type = "pico-button"
+name = "encoder 2 push (GP8)"
+index = 6
+
+# Pico encoders: relative CC, two's complement (1 = one click clockwise,
+# 127 = one click counter-clockwise). `control` is optional (0-119); without
+# it the next free controller from 102 is used.
+[[input]]
+type = "pico-encoder"
+name = "encoder 1"
+index = 0
+
+[[input]]
+type = "pico-encoder"
+name = "encoder 2"
+index = 1
+
+[[input]]
+type = "pico-encoder"
+name = "encoder 3"
+index = 2
+
+# Pico pots: 14-bit CC, like "pot". `invert = true` reverses a pot that
+# turns the wrong way (also works on "pot").
+[[input]]
+type = "pico-pot"
+name = "pot 1 (GP26), deck 1 low EQ"
+index = 0
+invert = true
+
+[[input]]
+type = "pico-pot"
+name = "pot 2 (GP27), deck 1 high EQ"
+index = 1
+invert = true
+
+[[input]]
+type = "pico-pot"
+name = "pot 3 (GP28)"
+index = 2

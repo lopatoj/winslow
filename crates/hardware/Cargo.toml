@@ -13,11 +13,12 @@ num-traits = "0.2.19"
 tokio = { version = "1.54.1", features = ["sync"] }
 tokio-stream = "0.1.19"
 wmidi = "4.0.11"
+libc = "0.2"
 log = "0.4"
 # Without libudev: only needed for port enumeration, which we don't use.
 serialport = { version = "4.10", default-features = false }
 winslow-protocol = { path = "../protocol" }
+winslow-scan = { path = "../scan" }
 
 [dev-dependencies]
-libc = "0.2"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }

@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut config = Config::load(&path)?;
 
     // Created once: recreating it on reload would make the host re-enumerate.
-    // Dropping it removes the gadget, so it lives until main returns.
+    // Held until main returns (an own gadget is removed when dropped).
     let _gadget = if config.midi.usb_gadget {
         let gadget = gadget::setup_gadget().map_err(|e| format!("USB gadget setup failed: {e}"))?;
         wait_for_card(&config.midi.device, Duration::from_secs(2));
@@ -131,6 +131,8 @@ impl log::Log for StderrLog {
 struct Pipeline {
     stop: oneshot::Sender<()>,
     task: JoinHandle<Result<(), OutputError>>,
+    /// Input reader threads; they exit once the output drops their streams.
+    readers: Vec<std::thread::JoinHandle<()>>,
     status: String,
 }
 
@@ -144,9 +146,12 @@ impl Pipeline {
         };
         let task =
             output(Box::new(source), &config.midi.device).map_err(|e| -> Box<dyn Error> { e })?;
-        // Sampler threads exit by themselves when the stream is dropped.
+        let mut readers = Vec::new();
         for device in io.iio_devices {
-            device.spawn()?;
+            readers.push(device.spawn()?);
+        }
+        if let Some(pico) = io.pico {
+            readers.push(pico.spawn()?);
         }
         let status = format!(
             "{} input(s) on {} channel {}",
@@ -155,7 +160,12 @@ impl Pipeline {
             config.midi.channel
         );
         log::info!("running: {status}");
-        Ok(Self { stop, task, status })
+        Ok(Self {
+            stop,
+            task,
+            readers,
+            status,
+        })
     }
 
     /// End the stream, wait for the output to close the device (so it can be
@@ -166,6 +176,18 @@ impl Pipeline {
             Ok(Ok(())) => {}
             Ok(Err(e)) => log::warn!("MIDI output had failed: {e}"),
             Err(e) => log::warn!("MIDI output task panicked: {e}"),
+        }
+        // The output has dropped the input streams, so the readers are
+        // finishing (within ~100 ms). Wait, so that e.g. the Pico's serial
+        // port, which is opened exclusively, is free to reopen.
+        let readers = self.readers;
+        let joined = tokio::task::spawn_blocking(move || {
+            for reader in readers {
+                let _ = reader.join();
+            }
+        });
+        if joined.await.is_err() {
+            log::warn!("an input reader thread panicked");
         }
     }
 }

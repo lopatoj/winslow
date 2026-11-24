@@ -1,4 +1,6 @@
 fn main() {
     // Enables `#[cfg(dt = "aliases::led0")]` and similar for devicetree nodes.
     zephyr_build::dt_cfgs();
+    // Enables `#[cfg(CONFIG_...)]` for boolean Kconfig options.
+    zephyr_build::export_kconfig_bool_options();
 }

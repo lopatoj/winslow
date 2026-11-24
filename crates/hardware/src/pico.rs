@@ -2,9 +2,12 @@
 //! `winslow-protocol` (see `firmware/`).
 //!
 //! One [`PicoBoard`] owns the serial port and reads it on a dedicated thread,
-//! fanning messages out to an event source per registered input. It asks the
-//! Pico for its current state when it starts and whenever the link comes back
-//! after the heartbeats stopped.
+//! fanning messages out to an event source per registered input.
+//!
+//! The Pico only talks while we talk to it (so that it can't disturb U-Boot
+//! when wired to UART0). Every 500 ms we send it a heartbeat, or, while it
+//! hasn't answered yet, a sync request, which it answers with its current
+//! state.
 
 use std::io::{self, Read, Write};
 use std::thread::{self, JoinHandle};
@@ -28,6 +31,9 @@ use crate::{
 const LINK_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often the reader wakes up to check for shutdown and link loss.
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
+/// How often we send a heartbeat (or a sync request while disconnected).
+/// The Pico goes quiet after 2 s without one.
+const PING_INTERVAL: Duration = Duration::from_millis(500);
 
 type Slot = Option<mpsc::Sender<Result<Event>>>;
 const SLOTS: usize = MAX_INDEX as usize + 1;
@@ -38,6 +44,8 @@ pub struct PicoBoard {
     buttons: [Slot; SLOTS],
     encoders: [Slot; SLOTS],
     pots: [Slot; SLOTS],
+    /// Events dropped since the output last had room.
+    dropped: u64,
 }
 
 impl PicoBoard {
@@ -53,6 +61,7 @@ impl PicoBoard {
             buttons: Default::default(),
             encoders: Default::default(),
             pots: Default::default(),
+            dropped: 0,
         })
     }
 
@@ -97,7 +106,8 @@ impl PicoBoard {
         let mut buf = [0u8; 64];
         let mut last_heard: Option<Instant> = None;
         let mut read_failing = false;
-        self.send(Message::Sync);
+        let mut next_ping = Instant::now();
+        log::info!("waiting for the Pico on {}", self.path);
 
         while self.any_open() {
             match self.port.read(&mut buf) {
@@ -136,6 +146,16 @@ impl PicoBoard {
                 );
                 last_heard = None;
             }
+
+            let now = Instant::now();
+            if now >= next_ping {
+                next_ping = now + PING_INTERVAL;
+                self.send(if last_heard.is_some() {
+                    Message::Heartbeat
+                } else {
+                    Message::Sync
+                });
+            }
         }
     }
 
@@ -160,10 +180,18 @@ impl PicoBoard {
         };
         let slot = &mut slots[index as usize];
         if let Some(tx) = slot {
-            // Blocking (not dropping) so presses and turns are never lost; the
-            // kernel buffers the UART meanwhile.
-            if tx.blocking_send(Ok(event)).is_err() {
-                *slot = None;
+            // Never block: this thread also keeps the link alive with
+            // heartbeats. The queue only fills if the MIDI output is stuck
+            // (nobody reading on the host), and then events are lost anyway.
+            match tx.try_send(Ok(event)) {
+                Ok(()) => self.dropped = 0,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    if self.dropped == 0 {
+                        log::warn!("MIDI output is backed up; dropping Pico events");
+                    }
+                    self.dropped += 1;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => *slot = None,
             }
         }
     }
@@ -251,15 +279,21 @@ mod tests {
 
         // The board asks for the current state first.
         let mut byte = [0u8; 1];
-        tokio::task::spawn_blocking(move || {
+        let _pico = tokio::task::spawn_blocking(move || {
             pico.read_exact(&mut byte).unwrap();
             assert_eq!(byte[0], 0xF2);
             pico.write_all(&encode(&[
                 Message::Hello { version: VERSION },
                 Message::ButtonDown(5), // not registered: ignored
                 Message::ButtonDown(2),
-                Message::Encoder { index: 0, delta: -3 },
-                Message::Analog { index: 1, value: 16383 },
+                Message::Encoder {
+                    index: 0,
+                    delta: -3,
+                },
+                Message::Analog {
+                    index: 1,
+                    value: 16383,
+                },
                 Message::Heartbeat,
                 Message::ButtonUp(2),
             ]))
@@ -281,6 +315,37 @@ mod tests {
             .unwrap();
         // So it can be opened again, e.g. on reload.
         PicoBoard::open(&path, 115200).unwrap();
+    }
+
+    #[test]
+    fn keeps_asking_until_answered_then_sends_heartbeats() {
+        let (mut pico, path) = pty();
+        let mut board = PicoBoard::open(&path, 115200).unwrap();
+        let events = board.button(0).unwrap().events();
+        let thread = board.spawn().unwrap();
+
+        let mut byte = [0u8; 1];
+        // Unanswered: a sync request every 500 ms.
+        for _ in 0..2 {
+            pico.read_exact(&mut byte).unwrap();
+            assert_eq!(byte[0], 0xF2);
+        }
+        // Answer; from then on, heartbeats.
+        pico.write_all(&encode(&[Message::Hello { version: VERSION }]))
+            .unwrap();
+        let mut next = || {
+            pico.read_exact(&mut byte).unwrap();
+            byte[0]
+        };
+        // A sync may already have been on its way.
+        let mut b = next();
+        if b == 0xF2 {
+            b = next();
+        }
+        assert_eq!(b, 0xF1);
+
+        drop(events);
+        thread.join().unwrap();
     }
 
     #[test]

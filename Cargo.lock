@@ -304,6 +304,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "winslow-protocol",
+ "winslow-scan",
  "wmidi",
 ]
 
@@ -999,6 +1000,7 @@ dependencies = [
  "tokio-stream",
  "toml",
  "usb-gadget",
+ "winslow-protocol",
  "wmidi",
 ]
 

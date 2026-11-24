@@ -36,6 +36,8 @@ const POT_SCANS: u32 = 4;
 const POT_DEADBAND: u16 = 8;
 /// Scans between heartbeats (500 ms).
 const HEARTBEAT_SCANS: u32 = 1000;
+/// Go quiet after this many scans (2 s) without hearing from the PocketBeagle.
+const HOST_TIMEOUT_SCANS: u32 = 4000;
 
 #[unsafe(no_mangle)]
 extern "C" fn rust_main() {
@@ -57,10 +59,12 @@ struct Encoder {
     a: Input,
     b: Input,
     decoder: Quadrature,
+    #[cfg(CONFIG_WINSLOW_ENCODER_DEBUG)]
+    debug: debug::EncoderDebug,
 }
 
 fn run() -> Result<(), &'static str> {
-    let mut link = Link::new(board::link_uart())?;
+    let mut link = Link::new(board::link_uart(), HOST_TIMEOUT_SCANS)?;
 
     let mut buttons = board::buttons()
         .iter()
@@ -79,7 +83,13 @@ fn run() -> Result<(), &'static str> {
             let b = Input::new(&e.b)?;
             // Assumes the encoder is resting on a detent at power-up.
             let decoder = Quadrature::new(a.read(), b.read(), e.steps_per_detent as u8);
-            Ok(Encoder { a, b, decoder })
+            Ok(Encoder {
+                #[cfg(CONFIG_WINSLOW_ENCODER_DEBUG)]
+                debug: debug::EncoderDebug::new(a.read(), b.read()),
+                a,
+                b,
+                decoder,
+            })
         })
         .collect::<Result<Vec<_>, &str>>()?;
 
@@ -97,7 +107,8 @@ fn run() -> Result<(), &'static str> {
     }
 
     let mut led = led::Led::new();
-    link.send(Message::Hello { version: VERSION });
+    // No hello yet: the link stays silent until the PocketBeagle asks for
+    // our state (see link.rs).
 
     let period = Duration::micros(SCAN_PERIOD_US.into());
     let mut timer = StoppedTimer::new().start_simple(period, period);
@@ -107,6 +118,8 @@ fn run() -> Result<(), &'static str> {
         // Blocks until the next period. If we ever overran, this returns at
         // once and we simply carry on; nothing needs catching up.
         timer.read_count_wait();
+        let was_connected = link.connected();
+        link.tick();
 
         for (i, b) in buttons.iter_mut().enumerate() {
             match b.debouncer.update(b.input.read(), DEBOUNCE_SAMPLES) {
@@ -117,7 +130,10 @@ fn run() -> Result<(), &'static str> {
         }
 
         for (i, e) in encoders.iter_mut().enumerate() {
-            let delta = e.decoder.update(e.a.read(), e.b.read());
+            let (a, b) = (e.a.read(), e.b.read());
+            let delta = e.decoder.update(a, b);
+            #[cfg(CONFIG_WINSLOW_ENCODER_DEBUG)]
+            e.debug.record(a, b, delta);
             if delta != 0 {
                 link.send(Message::Encoder {
                     index: i as u8,
@@ -134,8 +150,9 @@ fn run() -> Result<(), &'static str> {
             }
         }
 
-        // The PocketBeagle asks for a sync when its daemon starts, since it
-        // will usually have missed our hello (Linux boots much slower).
+        // The PocketBeagle's daemon asks for our state when it starts (or
+        // reconnects); the reply opens the conversation. Its heartbeats just
+        // keep the link open.
         while let Some(message) = link.receive() {
             if message == Message::Sync {
                 link.send(Message::Hello { version: VERSION });
@@ -149,6 +166,20 @@ fn run() -> Result<(), &'static str> {
                         link.send(analog(i, value));
                     }
                 }
+            }
+        }
+
+        if link.connected() != was_connected {
+            info!(
+                "PocketBeagle {}",
+                if link.connected() { "connected" } else { "went quiet" }
+            );
+        }
+
+        #[cfg(CONFIG_WINSLOW_ENCODER_DEBUG)]
+        if scans.is_multiple_of(debug::REPORT_SCANS) {
+            for (i, e) in encoders.iter_mut().enumerate() {
+                e.debug.report(i);
             }
         }
 
@@ -166,6 +197,65 @@ fn analog(index: usize, value: u16) -> Message {
     Message::Analog {
         index: index as u8,
         value: value << 2 | value >> 10,
+    }
+}
+
+/// Raw encoder activity, for diagnosing wiring (CONFIG_WINSLOW_ENCODER_DEBUG).
+#[cfg(CONFIG_WINSLOW_ENCODER_DEBUG)]
+mod debug {
+    use log::info;
+
+    /// Report every 500 scans (250 ms).
+    pub const REPORT_SCANS: u32 = 500;
+
+    pub struct EncoderDebug {
+        state: u8,
+        changes: u32,
+        invalid: u32,
+        clicks: i32,
+    }
+
+    impl EncoderDebug {
+        pub fn new(a: bool, b: bool) -> Self {
+            Self {
+                state: (a as u8) << 1 | b as u8,
+                changes: 0,
+                invalid: 0,
+                clicks: 0,
+            }
+        }
+
+        pub fn record(&mut self, a: bool, b: bool, delta: i8) {
+            let state = (a as u8) << 1 | b as u8;
+            if state != self.state {
+                self.changes += 1;
+                // Both pins changed between two samples: noise, or a missed
+                // step.
+                if state ^ self.state == 0b11 {
+                    self.invalid += 1;
+                }
+                self.state = state;
+            }
+            self.clicks += delta as i32;
+        }
+
+        /// Log and reset, if anything happened.
+        pub fn report(&mut self, index: usize) {
+            if self.changes == 0 {
+                return;
+            }
+            info!(
+                "encoder {index}: {} pin changes ({} invalid), {:+} clicks, now CLK={} DT={}",
+                self.changes,
+                self.invalid,
+                self.clicks,
+                self.state >> 1,
+                self.state & 1
+            );
+            self.changes = 0;
+            self.invalid = 0;
+            self.clicks = 0;
+        }
     }
 }
 

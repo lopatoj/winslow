@@ -1,4 +1,4 @@
-use hardware::event::Event::{self, Change, Falling, Rising};
+use hardware::event::Event::{self, Change, Delta, Falling, Rising};
 use wmidi::{
     Channel, ControlFunction,
     MidiMessage::{self},
@@ -40,6 +40,17 @@ impl AsMidi for Event {
                         U7::new(lsb).unwrap(),
                     ),
                 ]
+            }
+            // Relative CC in two's complement: 1..=63 clockwise, 127..=65
+            // counter-clockwise (127 = -1). Larger moves are clamped.
+            Delta(0) => vec![],
+            Delta(steps) => {
+                let value = (*steps).clamp(-63, 63) as i8 as u8 & 0x7F;
+                vec![MidiMessage::ControlChange(
+                    channel,
+                    ControlFunction(U7::from_u8_lossy(position)),
+                    U7::new(value).unwrap(),
+                )]
             }
         }
     }
@@ -179,4 +190,19 @@ fn messages_are_static_and_serialize_to_3_bytes() {
             "data bytes must be 7-bit: {buf:?}"
         );
     }
+}
+
+#[test]
+fn delta_is_relative_twos_complement_cc() {
+    assert_eq!(cc(&Delta(1).midi(CH, 102)[0]), (CH, 102, 1));
+    assert_eq!(cc(&Delta(-1).midi(CH, 102)[0]), (CH, 102, 127));
+    assert_eq!(cc(&Delta(5).midi(CH, 110)[0]), (CH, 110, 5));
+    assert_eq!(cc(&Delta(-5).midi(CH, 110)[0]), (CH, 110, 123));
+}
+
+#[test]
+fn delta_is_clamped_and_zero_sends_nothing() {
+    assert_eq!(cc(&Delta(1000).midi(CH, 102)[0]).2, 63);
+    assert_eq!(cc(&Delta(-1000).midi(CH, 102)[0]).2, 65);
+    assert!(Delta(0).midi(CH, 102).is_empty());
 }
